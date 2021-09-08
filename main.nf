@@ -6,26 +6,46 @@ params.help = false
 if (params.help) {
     log.info"""
     -----------------------------------------------------------------------------
-    RNAseq_variants: a workflow for calling variants from RNAseq data
+    RNAseq-variant-calling: a workflow for calling variants from RNAseq data
     =============================================================================
 
     Required arguments:
     -------------------
 
-    --reads         Full path to directory with reads. Default: ./fastq
+    --fastq         Full path to directory with reads. Default: ./fastq
 
     --outdir        Path to publish results. Default: ./results
-
-    --genome        Full path to STAR reference. Default: Hg38 in core group space
-
-    --rsem_index    Full path to RSEM index. Default: Hg38 in core group space
 
     
     Description:
     ------------
-    Index BAMS (BAMS and indicies are published to params.outdir/bams)
+    Call variants with GATK from bulk RNAseq data. Defaults to human Ensembl v96 but all reference files can be set via params.
+    Outline:
+        Make channel from paired end reads
+        Remove optical duplicates with Clumpify
+        Trim adapters with Cutadapt (hardcoded adapter sequence)
+        Map with STAR. BAMs published to outdir/bams
+        Index BAMS and calculate idxstats with Samtools. Also published to oudir/bams
+        featureCounts. Published to outdir/feature_counts
+        RSEM gene and isoform counts are published to outdir/rsem_out
+        
+        TODO:
+            RNAseq metics
+            Filter reads
+            Mark duplicates
+            Generate read coverage and passing bed file
+            Convert USeq to BigWig
+            Split and trim intron junctions
+            Indel realigner
+            Base recalibration
+            Pad BED file
+            Haplotype variant calls
+            Variant filtering
+            Merge raw variants
+            Generate genomic VCF for joint genotyping
+            Joint genotyping
 
-    Run RSEM to get gene and isoform counts (saved to params.outdir/rsem_out)
+            Add option to extract chroms or regions after STAR?
 
     -----------------------------------------------------------------------------
     """.stripIndent()
@@ -33,7 +53,7 @@ if (params.help) {
 }
 
 // Set default required params
-params.reads = "./fastq/*_R{1,2}_001.fastq.gz"
+params.fastq = "./fastq/*_R{1,2}_001.fastq.gz"
 params.outdir = './results'
 params.genome='/uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/data/Human/GRCh38/release96/star100'
 params.rsem_index='/uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/data/Human/GRCh38/release96/rsem/RSEM'
@@ -50,7 +70,7 @@ params.exons='/uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/data/H
 
 // Logging
 log.info("\n")
-log.info("Reads directory (--reads)         :${params.reads}")
+log.info("Fastq directory (--fastq)         :${params.fastq}")
 log.info("Genome          (--genome)        :${params.genome}")
 log.info("RSEM index      (--rsem_index)    :${params.rsem_index}")
 log.info("Results         (--outdir)        :${params.outdir}")
@@ -66,7 +86,7 @@ log.info("EXONS           (--exons)         :${params.exons}")
 
 // Read pair channel: tuple of pair_id and paired fastqs
 Channel
-    .fromFilePairs( params.reads )
+    .fromFilePairs( params.fastq )
     .ifEmpty { error "Cannot find any reads matching: ${params.reads}" }
     .set { read_pairs_ch }
 
@@ -177,20 +197,28 @@ process index {
 }
 
 // FeatureCounts
-process featureCounts {
+process feature_counts {
     tag "${pair_id}"
-
     publishDir "${params.outdir}/feature_counts", mode:"copy"
 
     input:
       tuple val(pair_id), path(bam), path(bai)
+      path(gtf)
 
     output:
       path("${pair_id}.counts.gz")
 
     script:
       """
-      /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/Subread/1.5.1/bin/featureCounts -T 8 -p -C -s 2 --largestOverlap -a /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/data/Human/GRCh38/release96/Homo_sapiens.GRCh38.96.gtf -o ${pair_id}.counts ${pair_id}.bam
+      /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/Subread/1.5.1/bin/featureCounts \
+      -T 8 \
+      -p \
+      -C \
+      -s 2 \
+      --largestOverlap \
+      -a $gtf \
+      -o ${pair_id}.counts \
+      ${pair_id}.bam
       gzip ${pair_id}.counts
       """
 }
@@ -211,9 +239,14 @@ process rsem {
     script:
       """
       /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/rsem/1.3.1/rsem-calculate-expression \
-      --alignments --paired-end --num-threads 8 \
-      --no-bam-output --quiet \
-      ${rsem_bam} ${params.rsem_index} ${pair_id}
+      --alignments \
+      --paired-end \
+      --num-threads 8 \
+      --no-bam-output \
+      --quiet \
+      ${rsem_bam} \
+      ${params.rsem_index} \
+      ${pair_id}
       """
 }
 
@@ -222,6 +255,6 @@ workflow {
     trim(dedup.out.deduped_reads)
     star(params.genome, trim.out.trimmed_reads)
     index(star.out.bam)
-    featureCounts(index.out.indexed_bam)
+    feature_counts(index.out.indexed_bam, params.gtf)
     rsem(params.rsem_index, star.out.rsem_input)
 }
