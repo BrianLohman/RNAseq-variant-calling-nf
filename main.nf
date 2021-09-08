@@ -28,9 +28,9 @@ if (params.help) {
         Index BAMS and calculate idxstats with Samtools. Also published to oudir/bams
         featureCounts. Published to outdir/feature_counts
         RSEM gene and isoform counts are published to outdir/rsem_out
+        RNAseq metrics with Picard. Published to outdir/rnaseq_metrics
         
         TODO:
-            RNAseq metics
             Filter reads
             Mark duplicates
             Generate read coverage and passing bed file
@@ -191,7 +191,7 @@ process index {
 
     script:
       """
-      /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/samtools/1.8/samtools index ${pair_id}.bam
+      /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/samtools/1.8/samtools index $bam
       /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/samtools/1.8/samtools idxstats ${pair_id}.bam | sort -V > ${pair_id}.idxstats
       """
 }
@@ -218,7 +218,7 @@ process feature_counts {
       --largestOverlap \
       -a $gtf \
       -o ${pair_id}.counts \
-      ${pair_id}.bam
+      $bam
       gzip ${pair_id}.counts
       """
 }
@@ -250,6 +250,31 @@ process rsem {
       """
 }
 
+// RNAseq metrics
+process rnaseq_metrics {
+    tag "${pair_id}"
+
+    publishDir "${params.outdir}/rnaseq_metrics", mode:"copy"
+
+    input:
+      tuple val(pair_id), path(bam), path(bai)
+      path(refflat)
+      path(riboint)
+
+    output:
+      path("${pair_id}.rna_metrics")
+
+    script:
+      """
+      java -Xmx${task.memory.giga}g -jar /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/picard/2.9.0/picard.jar \
+      CollectRnaSeqMetrics \
+      REF_FLAT=$refflat \
+      STRAND=SECOND_READ_TRANSCRIPTION_STRAND RIBOSOMAL_INTERVALS=$riboint \
+      I=$bam \
+      O=${pair_id}.rna_metrics
+      """
+}
+
 workflow {
     dedup(read_pairs_ch)
     trim(dedup.out.deduped_reads)
@@ -257,4 +282,5 @@ workflow {
     index(star.out.bam)
     feature_counts(index.out.indexed_bam, params.gtf)
     rsem(params.rsem_index, star.out.rsem_input)
+    rnaseq_metrics(index.out.indexed_bam, params.refflat, params.riboint)
 }
