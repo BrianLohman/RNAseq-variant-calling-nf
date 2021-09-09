@@ -31,10 +31,9 @@ if (params.help) {
         RNAseq metrics with Picard. Published to outdir/rnaseq_metrics
         Fliter alignments for unmapped, secondary, qcfail, and supplementary        
         Mark duplicates with Picard and reindex. TODO: currently indexing with samtools because Picard not writing bai
+        Generate read coverage with USeq and convert to BigWig. Published to outdir/coverage
         
         TODO:
-            Generate read coverage and passing bed file
-            Convert USeq to BigWig
             Split and trim intron junctions
             Indel realigner
             Base recalibration
@@ -315,6 +314,44 @@ process mark_duplicates {
       """
 }
 
+
+// Generate read coverage and passing BED file
+process useq {
+    tag "${pair_id}"
+
+    stageInMode 'copy'
+    
+    publishDir "${params.outdir}/coverage", mode:"copy"
+
+    input:
+      tuple val(pair_id), path(bam), path(bai)
+      path(exons)
+
+    output:
+      path("${pair_id}.region_stats.txt.gz")
+      path("${pair_id}.stats.json.gz")
+      path("${pair_id}.stats.txt")
+      path("*.bw")
+
+    script:
+      """
+      java -Xmx${task.memory.giga}g -jar /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/useq/9.1.3/Apps/Sam2USeq \
+      -f $bam \
+      -v H_sapiens_Dec_2013 \
+      -m 10 -a 1000 -r \
+      -b $exons \
+      -x 1000 -c 20 \
+      -p ${pair_id}.region_stats.txt.gz \
+      -j ${pair_id}.stats.json.gz \
+      -o ${pair_id}.stats.txt \
+      -n "${pair_id}"
+
+      java -Xmx${task.memory.giga}g -jar /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/useq/9.1.3/Apps/USeq2UCSCBig \
+      -u ./ \
+      -d /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/UCSC
+      """
+}
+
 workflow {
     dedup(read_pairs_ch)
     trim(dedup.out.deduped_reads)
@@ -325,4 +362,5 @@ workflow {
     rnaseq_metrics(index.out.indexed_bam, params.refflat, params.riboint)
     filter_alignments(index.out.indexed_bam)
     mark_duplicates(filter_alignments.out.filtered_bam)
+    useq(mark_duplicates.out.mkdup_bam, params.exons)
 }
