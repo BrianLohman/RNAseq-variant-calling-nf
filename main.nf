@@ -29,10 +29,10 @@ if (params.help) {
         featureCounts. Published to outdir/feature_counts
         RSEM gene and isoform counts are published to outdir/rsem_out
         RNAseq metrics with Picard. Published to outdir/rnaseq_metrics
+        Fliter alignments for unmapped, secondary, qcfail, and supplementary        
+        Mark duplicates with Picard and reindex. TODO: currently indexing with samtools because Picard not writing bai
         
         TODO:
-            Filter reads
-            Mark duplicates
             Generate read coverage and passing bed file
             Convert USeq to BigWig
             Split and trim intron junctions
@@ -275,6 +275,46 @@ process rnaseq_metrics {
       """
 }
 
+// Filter alignments and reindex
+// Unmapped, secondary, qcfail, supplementary = 2820 = 0xb04
+process filter_alignments {
+    tag "${pair_id}"
+
+    input:
+      tuple val(pair_id), path(bam), path(bai)
+
+    output:
+      tuple val(pair_id), path("${pair_id}.bam"), path("${pair_id}.bam.bai"), emit: filtered_bam
+
+    script:
+      """
+      /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/samtools/1.8/samtools view -F 2820 -@ 8 -b -o ${pair_id}.filter.bam $bam
+      /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/samtools/1.8/samtools index -b -@ 8 ${pair_id}.filter.bam ${pair_id}.filter.bai
+      """
+}   
+
+// Mark duplicates and reindex
+process mark_duplicates {
+    tag "${pair_id}"
+
+    input:
+      tuple val(pair_id), path(bam), path(bai)
+
+    output:
+      tuple val(pair_id), path("${pair_id}.mkdup.bam"), path("${pair_id}.mkdup.bam.bai"), emit: mkdup_bam
+
+    script:
+      """
+      java -Xmx${task.memory.giga}g -XX:ParallelGCThreads=${task.cpus} \
+      -jar /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/picard/2.9.0/picard.jar MarkDuplicates \
+      I=$bam \
+      O=${pair_id}.mkdup.bam \
+      M=${pair_id}.markduplicates.txt \
+      REMOVE_DUPLICATES=false
+      /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/samtools/1.8/samtools index ${pair_id}.mkdup.bam
+      """
+}
+
 workflow {
     dedup(read_pairs_ch)
     trim(dedup.out.deduped_reads)
@@ -283,4 +323,6 @@ workflow {
     feature_counts(index.out.indexed_bam, params.gtf)
     rsem(params.rsem_index, star.out.rsem_input)
     rnaseq_metrics(index.out.indexed_bam, params.refflat, params.riboint)
+    filter_alignments(index.out.indexed_bam)
+    mark_duplicates(filter_alignments.out.filtered_bam)
 }
