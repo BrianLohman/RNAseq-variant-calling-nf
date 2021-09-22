@@ -31,20 +31,16 @@ if (params.help) {
         RNAseq metrics with Picard. Published to outdir/rnaseq_metrics
         Fliter alignments for unmapped, secondary, qcfail, and supplementary        
         Mark duplicates with Picard and reindex. TODO: currently indexing with samtools because Picard not writing bai
-        Generate read coverage with USeq and convert to BigWig. Published to outdir/coverage
-        
-        TODO:
-            Split and trim intron junctions
-            Indel realigner
-            Base recalibration
-            Pad BED file
-            Haplotype variant calls
-            Variant filtering
-            Merge raw variants
-            Generate genomic VCF for joint genotyping
-            Joint genotyping
-
-            Add option to extract chroms or regions after STAR?
+        Generate read coverage with USeq and convert to BigWig. Published to outdir/coverage 
+        Split and trim intron junctions
+        Indel realigner
+        Base recalibration
+        Pad BED file
+        Haplotype variant calls. Published to outdir/haplotype_vcf
+        Variant filtering
+        Merge raw variants
+        Generate genomic VCF for joint genotyping
+        Joint genotyping. Published to outdir/final
 
     -----------------------------------------------------------------------------
     """.stripIndent()
@@ -175,6 +171,7 @@ process star {
 // Index BAMs
 process index {
     tag "${pair_id}"
+ 
     publishDir "${params.outdir}/bams", mode:"copy"
 
     input:
@@ -194,6 +191,7 @@ process index {
 // FeatureCounts
 process feature_counts {
     tag "${pair_id}"
+ 
     publishDir "${params.outdir}/feature_counts", mode:"copy"
 
     input:
@@ -221,6 +219,7 @@ process feature_counts {
 // RSEM to get gene and isoform counts
 process rsem {
     tag "$pair_id"
+    
     publishDir "${params.outdir}/rsem_out", mode:"copy"
  
     input:
@@ -327,7 +326,7 @@ process useq {
       path("${pair_id}.stats.json.gz")
       path("${pair_id}.stats.txt")
       path("*.bw")
-      tuple val("${pair_id}"), path("${pair_id}_Pass.bed.gz"), emit: passing_bed
+      tuple val(pair_id), path("${pair_id}_Pass.bed.gz"), emit: passing_bed
 
     script:
       """
@@ -350,8 +349,6 @@ process useq {
 
 // Split and trim intron junctions
 process intron_junctions {
-    label 'gatk'
-    
     tag "${pair_id}"
 
     input:
@@ -373,14 +370,13 @@ process intron_junctions {
       -o ${pair_id}.split.bam \
       -U ALLOW_N_CIGAR_READS \
       -drf DuplicateRead 
+
       /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/samtools/1.8/samtools index ${pair_id}.split.bam
       """
 }
 
 // Indel realigner
 process indel_realigner {
-    label 'gatk'
-    
     tag "${pair_id}"
 
     input:
@@ -421,8 +417,6 @@ process indel_realigner {
 
 // Base recalibration
 process base_recalibration {
-    label 'gatk'
-    
     tag "${pair_id}"
 
     input:
@@ -464,36 +458,11 @@ process base_recalibration {
       """
 }
 
-// Prepare bed file of passing coverage intervals for variant calling
-// Extend file by 20 bp in both directions as padding
-process prep_bed {
-    tag "${pair_id}"
-
-    input:
-      path(chromsize)
-      tuple val(pair_id), path(passing_bed)
-
-    output:
-      path("${pair_id}_Pass.ext20.bed.gz"), emit: padded_bed
-      path("${pair_id}_call*"), emit: split_bed
- 
-    script:
-      """
-      zcat ${passing_bed} | \
-      /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/bedtools/2.22.1/bedtools slop -g $chromsize -b 20 -i - | \
-      /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/bedtools/2.22.1/bedtools sort -i - > "${pair_id}_Pass.ext20.bed"
-      split -a 1 -n l/12 --additional-suffix=.bed "${pair_id}_Pass.ext20.bed" "${pair_id}_call."
-      gzip "${pair_id}_Pass.ext20.bed"
-      """
-}
-
 // Haplotype variant calling
 process variant_calling {
-    label 'gatk'
-    
     tag "${pair_id}"
 
-    publishDir "${params.outdir}/vcf", mode:"copy"
+    publishDir "${params.outdir}/haplotype_vcf", mode:"copy"
 
     input:
       path(ref)
@@ -501,14 +470,23 @@ process variant_calling {
       path(dbsnp)
       path(dbsnp_index) 
       path(dict)
+      path(chromsize)
+      tuple val(pair_id), path(passing_bed)
       tuple val(pair_id), path(bam), path(bai)
-      path(split_bed)
-
+      
     output:
-      path("${pair_id}.vcf.gz"), emit: vcf
+      tuple val(pair_id), path("${pair_id}.vcf.gz"), path("${pair_id}.vcf.gz.tbi"), emit: vcf
 
     script:
       """
+      # split bed file for manual parallel processing
+      zcat $passing_bed | \
+      /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/bedtools/2.22.1/bedtools slop -g $chromsize -b 20 -i - | \
+      /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/bedtools/2.22.1/bedtools sort -i - > "${pair_id}_Pass.ext20.bed"
+      split -a 1 -n l/12 --additional-suffix=.bed "${pair_id}_Pass.ext20.bed" "${pair_id}_call."
+      gzip "${pair_id}_Pass.ext20.bed"
+      
+      # generate variant calls
       parallel -k --delay 10 \
       java -Xmx4G -XX:ParallelGCThreads=${task.cpus} \
       -jar /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/gatk/3.8/GenomeAnalysisTK.jar -T HaplotypeCaller \
@@ -555,13 +533,13 @@ process variant_calling {
       I=${pair_id}_call.j.vcf.gz \
       I=${pair_id}_call.k.vcf.gz \
       I=${pair_id}_call.l.vcf.gz \
+
+      /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/tabix/1.8/tabix -fp vcf ${pair_id}.vcf.gz
       """
 }
 
 // Generate genomic VCF for joint genotyping
 process genomic_vcf {
-    label 'gatk'
-    
     tag "${pair_id}"
 
     publishDir "${params.outdir}/genomic_vcf", mode:"copy"
@@ -575,6 +553,7 @@ process genomic_vcf {
 
     output:
       path("${pair_id}.g.vcf.gz"), emit: gvcf
+      path("${pair_id}.g.vcf.gz.tbi"), emit: gvcf_index
 
     script:
       """
@@ -615,12 +594,13 @@ process genomic_vcf {
       I=exon_call.j.g.vcf.gz \
       I=exon_call.k.g.vcf.gz \
       I=exon_call.l.g.vcf.gz \
+
+      /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/tabix/1.8/tabix -fp vcf ${pair_id}.g.vcf.gz
       """
 }
-/*
+
 // Merge sample gVCF files
 process joint_genotype {
-    label 'gatk'
 
     input:
       path(exons)
@@ -629,11 +609,12 @@ process joint_genotype {
       path(dict)
       path(dbsnp)
       path(dbsnp_index)
-      path(project)
-      path(gvcf)
+      val(project)
+      path(all_gvcf)
+      path(all_gvcf_index)
 
     output:
-      path("${project}.raw.vcf.gz"), emit: raw_merged_vcf
+      tuple val(project), path("${project}.raw.vcf.gz"), path("${project}.raw.vcf.gz.tbi"), emit: raw_merged_vcf
 
     script:
       """
@@ -648,13 +629,7 @@ process joint_genotype {
       -R $ref \
       -L exon_call.{}.bed \
       --interval_padding 20 \
-
-// FIX THIS TO TAKE COLLECTION OF ALL GVCF FILES
-      --variant 19081X1.g.vcf.gz \
-      --variant 19081X2.g.vcf.gz \
-      --variant 19081X3.g.vcf.gz \
-      --variant 19081X4.g.vcf.gz \
-
+      --variant ${all_gvcf.join(' --variant ')} \
       -o ${project}.{}.g.vcf.gz \
       ':::' a b c d e f g h i j k l m n o p
 
@@ -673,7 +648,7 @@ process joint_genotype {
       java -Xmx20G -jar /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/picard/2.9.0/picard.jar SortVcf \
       SD=$dict \
       O=${project}.raw.vcf.gz \
-      I=${project.a.raw.vcf.gz \
+      I=${project}.a.raw.vcf.gz \
       I=${project}.b.raw.vcf.gz \
       I=${project}.c.raw.vcf.gz \
       I=${project}.d.raw.vcf.gz \
@@ -689,23 +664,23 @@ process joint_genotype {
       I=${project}.n.raw.vcf.gz \
       I=${project}.o.raw.vcf.gz \
       I=${project}.p.raw.vcf.gz
+
+      /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/tabix/1.8/tabix -fp vcf ${project}.raw.vcf.gz
       """
 }
 
 // Hard filter excess heterozygosity
 // phred score of 54.69 corresponds to a z-score -4.5
 process filter_het {
-    label 'gatk'
     
     input:
       path(ref)
       path(ref_index)
       path(dict)
-      path(project)
-      path(raw_merged_vcf)
+      tuple val(project), path(raw_merged_vcf), path(raw_merged_vcf_index)
 
     output:
-      path("${project}.excessHet.vcf.gz"), emit: excessive_het
+      tuple val(project), path("${project}.excessHet.vcf.gz"), path("${project}.excessHet.vcf.gz.tbi"), emit: excessive_het
 
     script:
       """
@@ -717,19 +692,20 @@ process filter_het {
       -filter "ExcessHet > 54.69" \
       -filterName ExcessHet \
       -o ${project}.excessHet.vcf.gz
+      
+      /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/tabix/1.8/tabix -fp vcf ${project}.excessHet.vcf.gz
       """
 }
 
 // SNP Variant Recalibration
 process snp_recalibration {
-    label 'gatk'
+    stageInMode 'copy'
 
     input:
       path(ref)
       path(ref_index)
       path(dict)
-      path(project)
-      path(excessive_het)
+      tuple val(project), path(excessive_het), path(excessive_het_index)
       path(hapmap)
       path(hapmap_index)
       path(omni)
@@ -751,11 +727,11 @@ process snp_recalibration {
       -jdk_deflater -jdk_inflater \
       -T VariantRecalibrator \
       -R $ref \
-      -input ${project}.excessHet.vcf.gz \
+      -input $excessive_het \
       -mode SNP \
       -resource:hapmap,known=false,training=true,truth=true,prior=15 $hapmap \
       -resource:omni,known=false,training=true,truth=true,prior=12 $omni \
-      -resource:1000G,known=false,training=true,truth=false,prior=10 $highconfsnps \
+      -resource:1000G,known=false,training=true,truth=false,prior=10 $hiconfsnps \
       -resource:dbsnp,known=true,training=false,truth=false,prior=7 $dbsnp \
       -an QD \
       -an ReadPosRankSum \
@@ -769,17 +745,14 @@ process snp_recalibration {
       """
 }
 
-
 // INDEL Variant Recalibration
 process indel_recalibration {
-    label 'gatk'
 
     input:
       path(ref)
       path(ref_index)
       path(dict)
-      path(project)
-      path(excessive_het)
+      tuple val(project), path(excessive_het), path(excessive_het_index)
       path(goldindels)
       path(goldindels_index)
       path(dbsnp)
@@ -796,7 +769,7 @@ process indel_recalibration {
       -jdk_deflater -jdk_inflater \
       -T VariantRecalibrator \
       -R $ref \
-      -input ${project}.excessHet.vcf.gz \
+      -input $excessive_het \
       -mode INDEL \
       -resource:mills,known=false,training=true,truth=true,prior=12 $goldindels \
       -resource:dbsnp,known=true,training=false,truth=false,prior=2 $dbsnp \
@@ -814,37 +787,37 @@ process indel_recalibration {
 
 // Apply SNP Recalibration
 process apply_snp_recalibration {
-    label 'gatk'
 
     input:
       path(ref)
       path(ref_index)
       path(dict)
-      path(project)
+      tuple val(project), path(excessive_het), path(excessive_het_index)
       path(snp_tranches)
       path(snp_recal)
 
     output:
-      path("${project}.snp.recal.vcf.gz"), emit: snp_recal_vcf
+      tuple val(project), path("${project}.snp.recal.vcf.gz"), path("${project}.snp.recal.vcf.gz.tbi"), emit: snp_recal_vcf
 
     script:
       """
-      $JAVA_PATH -Xmx24G -jar /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/gatk/3.8/GenomeAnalysisTK.jar \
+      java -Xmx24G -jar /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/gatk/3.8/GenomeAnalysisTK.jar \
       -jdk_deflater -jdk_inflater \
       -T ApplyRecalibration \
       -R $ref \
-      -input ${project}.excessHet.vcf.gz \
+      -input $excessive_het \
       -mode SNP \
-      -tranchesFile ${project}.snp.tranches \
-      -recalFile ${project}.snp.recal \
+      -tranchesFile $snp_tranches \
+      -recalFile $snp_recal \
       --ts_filter_level 95 \
       -o ${project}.snp.recal.vcf.gz
+
+      /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/tabix/1.8/tabix -fp vcf ${project}.snp.recal.vcf.gz
       """
 }
 
 // Apply INDEL Recalibration
-process apply_snp_recalibration {
-    label 'gatk'
+process apply_indel_recalibration {
 
     publishDir "${params.outdir}/final", mode:"copy"
 
@@ -852,30 +825,32 @@ process apply_snp_recalibration {
       path(ref)
       path(ref_index)
       path(dict)
-      path(project)
-      path(snp_recal_vcf)
+      val(project)
+      tuple val(project), path(snp_recal_vcf), path(snp_recal_vcf_index)
       path(indel_tranches)
       path(indel_recal)
 
     output:
       path("${project}.vqsr.vcf.gz")
+      path("${project}.vqsr.vcf.gz.tbi")
+
 
     script:
       """
-      $JAVA_PATH -Xmx24G -jar /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/gatk/3.8/GenomeAnalysisTK.jar \
+      java -Xmx24G -jar /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/gatk/3.8/GenomeAnalysisTK.jar \
       -jdk_deflater -jdk_inflater \
       -T ApplyRecalibration \
       -R $ref \
-      -input ${project}.snp.recal.vcf.gz \
+      -input $snp_recal_vcf \
       -mode INDEL \
-      -tranchesFile ${project}.indel.tranches \
-      -recalFile ${project}.indel.recal \
+      -tranchesFile $indel_tranches \
+      -recalFile $indel_recal \
       --ts_filter_level 95 \
       -o ${project}.vqsr.vcf.gz
+
+      /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/tabix/1.8/tabix -fp vcf ${project}.vqsr.vcf.gz
       """
 }
-
-*/
 
 workflow {
     dedup(read_pairs_ch)
@@ -891,13 +866,12 @@ workflow {
     intron_junctions(params.ref, params.ref_index, params.dict, mark_duplicates.out.mkdup_bam)
     indel_realigner(params.ref, params.ref_index, params.dict, params.goldindels, params.goldindels_index, intron_junctions.out.split_bam)
     base_recalibration(params.ref, params.ref_index, params.dict, params.hiconfsnps, params.hiconfsnps_index, params.goldindels, params.goldindels_index, indel_realigner.out.realigned_bam)
-    prep_bed(params.chromsize, useq.out.passing_bed)
-    variant_calling(params.ref, params.ref_index, params.dbsnp, params.dbsnp_index, params.dict, base_recalibration.out.final_bam, prep_bed.out.split_bed)
+//    variant_calling(params.ref, params.ref_index, params.dbsnp, params.dbsnp_index, params.dict, params.chromsize, useq.out.passing_bed, base_recalibration.out.final_bam)
     genomic_vcf(params.exons, params.ref, params.ref_index, params.dict, base_recalibration.out.final_bam)
-//    joint_genotype(params.exons, params.ref, params.ref_index, params.dict, params.dbsnp, params.dbsnp_index, params.project, genomic_vcf.out.gvcf.collect())
-//    filter_het(params.ref, params.ref_index, params.dict, params.project, joint_genotype.out.raw_merged_vcf)
-//    snp_recalibration(params.ref, params.ref_index, params.dict, params.project, filter_het.out_excessive_het, params.omni, params.omni_index, params.hiconfsnps, params.hiconfsnps_index, params.dbsnp, params.dbsnp_index)
-//    indel_recalibration(params.ref, params.ref_index, params.dict, params.project, filter_het.out_excessive_het, params.goldindels, params.goldindels_index, params.dbsnp, params.dbsnp_index)
-//    apply_snp_recalibration(params.ref, params.ref_index, params.dict, params.project, snp_recalibration.out.snp_tranches, snp_recalibration.out.snp_recal)
-//    apply_indel_recalibration(params.ref, params.ref_index, params.dict, params.project, apply_snp_recalibration.out.snp_recal_vcf, indel_recalibration.out.indel_tranches, indel_recalibration.out.indel_recal)
+    joint_genotype(params.exons, params.ref, params.ref_index, params.dict, params.dbsnp, params.dbsnp_index, params.project, genomic_vcf.out.gvcf.collect(), genomic_vcf.out.gvcf_index.collect())
+    filter_het(params.ref, params.ref_index, params.dict, joint_genotype.out.raw_merged_vcf)
+    snp_recalibration(params.ref, params.ref_index, params.dict, filter_het.out.excessive_het, params.hapmap, params.hapmap_index, params.omni, params.omni_index, params.hiconfsnps, params.hiconfsnps_index, params.dbsnp, params.dbsnp_index)
+    indel_recalibration(params.ref, params.ref_index, params.dict, filter_het.out.excessive_het, params.goldindels, params.goldindels_index, params.dbsnp, params.dbsnp_index)
+    apply_snp_recalibration(params.ref, params.ref_index, params.dict, filter_het.out.excessive_het, snp_recalibration.out.snp_tranches, snp_recalibration.out.snp_recal)
+    apply_indel_recalibration(params.ref, params.ref_index, params.dict, params.project, apply_snp_recalibration.out.snp_recal_vcf, indel_recalibration.out.indel_tranches, indel_recalibration.out.indel_recal)
 }
