@@ -19,7 +19,9 @@ if (params.help) {
     
     Description:
     ------------
-    Call variants with GATK from bulk RNAseq data. Defaults to human Ensembl v96 but all reference files can be set via params.
+    Call variants with GATK from bulk RNAseq data. Defaults to human Ensembl v96.
+    All reference files can be set via params in nextflow.config.
+
     Outline:
         Make channel from paired end reads
         Remove optical duplicates with Clumpify
@@ -131,7 +133,7 @@ process trim {
       """
 }
 
-// Maps each read-pair by using STAR
+// Maps each read-pair with STAR
 process star {
     tag "$pair_id"
       
@@ -216,7 +218,7 @@ process feature_counts {
       """
 }
 
-// RSEM to get gene and isoform counts
+// RSEM: gene and isoform counts
 process rsem {
     tag "$pair_id"
     
@@ -720,7 +722,6 @@ process snp_recalibration {
       path("${project}.snp.recal"), emit: snp_recal
       path("${project}.snp.plots.R")
 
-
     script:
       """
       java -Xmx24G -jar /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/gatk/3.8/GenomeAnalysisTK.jar \
@@ -834,7 +835,6 @@ process apply_indel_recalibration {
       path("${project}.vqsr.vcf.gz")
       path("${project}.vqsr.vcf.gz.tbi")
 
-
     script:
       """
       java -Xmx24G -jar /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/gatk/3.8/GenomeAnalysisTK.jar \
@@ -866,7 +866,7 @@ workflow {
     intron_junctions(params.ref, params.ref_index, params.dict, mark_duplicates.out.mkdup_bam)
     indel_realigner(params.ref, params.ref_index, params.dict, params.goldindels, params.goldindels_index, intron_junctions.out.split_bam)
     base_recalibration(params.ref, params.ref_index, params.dict, params.hiconfsnps, params.hiconfsnps_index, params.goldindels, params.goldindels_index, indel_realigner.out.realigned_bam)
-//    variant_calling(params.ref, params.ref_index, params.dbsnp, params.dbsnp_index, params.dict, params.chromsize, useq.out.passing_bed, base_recalibration.out.final_bam)
+    variant_calling(params.ref, params.ref_index, params.dbsnp, params.dbsnp_index, params.dict, params.chromsize, useq.out.passing_bed, base_recalibration.out.final_bam)
     genomic_vcf(params.exons, params.ref, params.ref_index, params.dict, base_recalibration.out.final_bam)
     joint_genotype(params.exons, params.ref, params.ref_index, params.dict, params.dbsnp, params.dbsnp_index, params.project, genomic_vcf.out.gvcf.collect(), genomic_vcf.out.gvcf_index.collect())
     filter_het(params.ref, params.ref_index, params.dict, joint_genotype.out.raw_merged_vcf)
