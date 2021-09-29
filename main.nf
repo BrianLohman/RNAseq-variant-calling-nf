@@ -273,20 +273,30 @@ process rnaseq_metrics {
 
 // Filter alignments and reindex
 // Unmapped, secondary, qcfail, supplementary = 2820 = 0xb04
+// Extract regions from BED file if specified in params.bed
 process filter_alignments {
     tag "${pair_id}"
 
     input:
       tuple val(pair_id), path(bam), path(bai)
+      path(bed)
 
     output:
       tuple val(pair_id), path("${pair_id}.bam"), path("${pair_id}.bam.bai"), emit: filtered_bam
 
     script:
+      if( params.bed == 'NO_FILE' ) {
       """
+      /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/samtools/1.8/samtools view -L $bed -o ${pair_id}_subset.bam $bam
+      /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/samtools/1.8/samtools view -F 2820 -@ 8 -b -o ${pair_id}.filter.bam ${pair_id}_subset.bam
+      """
+      } else {
+      """
+      /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/samtools/1.8/samtools index -b -@ 8 ${pair_id}.filter.bam ${pair_id}.filter.bai
       /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/samtools/1.8/samtools view -F 2820 -@ 8 -b -o ${pair_id}.filter.bam $bam
       /uufs/chpc.utah.edu/common/HIPAA/hci-bioinformatics1/atlatl/app/samtools/1.8/samtools index -b -@ 8 ${pair_id}.filter.bam ${pair_id}.filter.bai
       """
+      }
 }   
 
 // Mark duplicates and reindex
@@ -860,7 +870,7 @@ workflow {
     feature_counts(index.out.indexed_bam, params.gtf)
     rsem(params.rsem_index, star.out.rsem_input)
     rnaseq_metrics(index.out.indexed_bam, params.refflat, params.riboint)
-    filter_alignments(index.out.indexed_bam)
+    filter_alignments(index.out.indexed_bam, params.bed)
     mark_duplicates(filter_alignments.out.filtered_bam)
     useq(mark_duplicates.out.mkdup_bam, params.exons)
     intron_junctions(params.ref, params.ref_index, params.dict, mark_duplicates.out.mkdup_bam)
