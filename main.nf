@@ -14,7 +14,7 @@ if (params.help) {
 
     --fastq         Full path to directory with reads. Default: ./fastq
 
-    --outdir        Path to publish results. Default: ./results
+    --project       Name of project (or sample prefix) given to final vcf
 
     
     Description:
@@ -29,10 +29,10 @@ if (params.help) {
         Map with STAR. BAMs published to outdir/bams
         Index BAMS and calculate idxstats with Samtools. Also published to oudir/bams
         featureCounts. Published to outdir/feature_counts
-        RSEM gene and isoform counts are published to outdir/rsem_out
+        RSEM gene and isoform counts are published to outdir/rsem
         RNAseq metrics with Picard. Published to outdir/rnaseq_metrics
-        Fliter alignments for unmapped, secondary, qcfail, and supplementary        
-        Mark duplicates with Picard and reindex. TODO: currently indexing with samtools because Picard not writing bai
+        Fliter alignments for unmapped, secondary, qcfail, and supplementary. OPTIONAL filter by prams.bed        
+        Mark duplicates with Picard and reindex.
         Generate read coverage with USeq and convert to BigWig. Published to outdir/coverage 
         Split and trim intron junctions
         Indel realigner
@@ -222,7 +222,7 @@ process feature_counts {
 process rsem {
     tag "$pair_id"
     
-    publishDir "${params.outdir}/rsem_out", mode:"copy"
+    publishDir "${params.outdir}/rsem", mode:"copy"
  
     input:
       path(params.rsem_index)
